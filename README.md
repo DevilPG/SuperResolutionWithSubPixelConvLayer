@@ -1,2 +1,0 @@
-# SuperResolutionWithSubPixelConvLayer
-使用带子像素卷积层的卷积神经网络实现单图像超分辨率
