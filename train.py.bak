@@ -1,0 +1,165 @@
+import argparse
+
+import torch
+import torch.nn as nn
+import torch.optim as optim
+import torchnet as tnt
+import torchvision.transforms as transforms
+from torch.autograd import Variable
+from torch.optim.lr_scheduler import MultiStepLR
+from torch.utils.data import DataLoader
+from torchnet.engine import Engine
+from tqdm import tqdm
+
+from data_utils import DatasetFromFolder
+from model import SPCNNet
+from psnrmeter import PSNRMeter
+
+from matplotlib import pyplot as plt
+
+global meter_loss
+global meter_psnr
+global scheduler
+global engine
+global epoch_num 
+global psnr_value 
+global loss_value 
+global train_loader
+global val_loader
+global model
+global criterion
+global UPSCALE_FACTOR
+
+def processor(sample):
+    data, target, training = sample
+    data = Variable(data)
+    target = Variable(target)
+    if torch.cuda.is_available():
+        data = data.cuda()
+        target = target.cuda()
+
+    output = model(data)
+    loss = criterion(output, target)
+
+    return loss, output
+
+
+def on_sample(state):
+    state['sample'].append(state['train'])
+
+
+def reset_meters():
+    meter_psnr.reset()
+    meter_loss.reset()
+
+
+def on_forward(state):
+    meter_psnr.add(state['output'].data, state['sample'][1])
+    meter_loss.add(state['loss'].item())
+
+
+def on_start_epoch(state):
+    reset_meters()
+    scheduler.step()
+    state['iterator'] = tqdm(state['iterator'])
+
+
+def on_end_epoch(state):
+    print('[Epoch %d] Train Loss: %.4f (PSNR: %.2f db)' % (
+        state['epoch'], meter_loss.value()[0], meter_psnr.value()))
+
+    #train_loss_logger.log(state['epoch'], meter_loss.value()[0])
+    #train_psnr_logger.log(state['epoch'], meter_psnr.value())
+
+    reset_meters()
+
+    engine.test(processor, val_loader)
+    #val_loss_logger.log(state['epoch'], meter_loss.value()[0])
+    #val_psnr_logger.log(state['epoch'], meter_psnr.value())
+
+    print('[Epoch %d] Val Loss: %.4f (PSNR: %.2f db)' % (
+        state['epoch'], meter_loss.value()[0], meter_psnr.value()))
+    epoch_num.append(int(state['epoch']))
+    psnr_value.append(meter_psnr.value())
+    loss_value.append(meter_loss.value()[0])
+
+    torch.save(model.state_dict(), 'epochs/epoch_%d_%d.pt' % (UPSCALE_FACTOR, state['epoch']))
+    
+    
+def main(factor):
+    global meter_loss
+    global meter_psnr
+    global scheduler
+    global engine
+    global epoch_num 
+    global psnr_value 
+    global loss_value 
+    global train_loader
+    global val_loader
+    global model
+    global criterion
+    global UPSCALE_FACTOR
+    
+    parser = argparse.ArgumentParser(description='Super Resolution Training')
+    parser.add_argument('--upscale_factor', default=3, type=int, help='super resolution upscale factor')
+    parser.add_argument('--num_epochs', default=100, type=int, help='super resolution epochs number')
+    opt = parser.parse_args()
+
+    UPSCALE_FACTOR = opt.upscale_factor
+    NUM_EPOCHS = opt.num_epochs
+    if factor != 3:
+        UPSCALE_FACTOR = factor
+
+    train_set = DatasetFromFolder('data/train', upscale_factor=UPSCALE_FACTOR, input_transform=transforms.ToTensor(),
+                                  target_transform=transforms.ToTensor())
+    val_set = DatasetFromFolder('data/val', upscale_factor=UPSCALE_FACTOR, input_transform=transforms.ToTensor(),
+                                target_transform=transforms.ToTensor())
+    train_loader = DataLoader(dataset=train_set, num_workers=0, batch_size=64, shuffle=True)
+    val_loader = DataLoader(dataset=val_set, num_workers=0, batch_size=64, shuffle=False)
+
+    model = SPCNNet(upscale_factor=UPSCALE_FACTOR)
+    criterion = nn.MSELoss()
+    
+    if torch.cuda.is_available():
+        model = model.cuda()
+        criterion = criterion.cuda()
+        
+    print('# upscale factor:', UPSCALE_FACTOR)
+    print('# parameters:', sum(param.numel() for param in model.parameters()))
+
+    optimizer = optim.Adam(model.parameters(), lr=1e-3)
+    scheduler = MultiStepLR(optimizer, milestones=[30, 80], gamma=0.1)
+
+    engine = Engine()
+    meter_loss = tnt.meter.AverageValueMeter()
+    meter_psnr = PSNRMeter()
+    epoch_num = []
+    psnr_value = []
+    loss_value = []
+
+    engine.hooks['on_sample'] = on_sample
+    engine.hooks['on_forward'] = on_forward
+    engine.hooks['on_start_epoch'] = on_start_epoch
+    engine.hooks['on_end_epoch'] = on_end_epoch
+
+    engine.train(processor, train_loader, maxepoch=NUM_EPOCHS, optimizer=optimizer)
+    
+    plt.plot(epoch_num, psnr_value, lw=2, ls='-', label="PSNR--x"+str(UPSCALE_FACTOR), color="r", marker="+")
+    plt.xlabel("epoch time(s)", fontsize=16, horizontalalignment="right")
+    plt.ylabel("PSNR value", fontsize=16, horizontalalignment="right")
+    
+    plt.legend()
+    plt.savefig('D:\大三上\数字图像处理\SR_Project\plots\PSNRx'+str(UPSCALE_FACTOR)+'.png')
+    plt.show()
+    
+    plt.plot(epoch_num, loss_value, lw=2, ls='-', label="Loss--x"+str(UPSCALE_FACTOR), color="r", marker="+")
+    plt.xlabel("epoch time(s)", fontsize=16, horizontalalignment="right")
+    plt.ylabel("Loss value", fontsize=16, horizontalalignment="right")
+    
+    plt.legend()
+    plt.savefig('D:\大三上\数字图像处理\SR_Project\plots\LOSSx'+str(UPSCALE_FACTOR)+'.png')
+    plt.show()
+
+
+if __name__ == "__main__":
+    main(3)
